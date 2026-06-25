@@ -1,0 +1,41 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: olist_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-olist}
+      POSTGRES_USER: ${POSTGRES_USER:-olist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-olist}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-olist} -d ${POSTGRES_DB:-olist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  streamlit:
+    build: .
+    container_name: olist_dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-olist}
+      - POSTGRES_USER=${POSTGRES_USER:-olist}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-olist}
+      - POSTGRES_SCHEMA=${POSTGRES_SCHEMA:-analytics}
+      - DATA_DIR=/app/data
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

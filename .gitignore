@@ -1,0 +1,6 @@
+.venv/
+.env
+data/
+data.zip
+__pycache__/
+sketch/
