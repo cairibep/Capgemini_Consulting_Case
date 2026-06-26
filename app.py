@@ -24,6 +24,7 @@ from src.db import (
     load_view,
 )
 from src.charts import (
+    category_quality_scatter,
     category_share_treemap,
     customer_segments_donut,
     delivery_kpi_bars,
@@ -31,6 +32,7 @@ from src.charts import (
     revenue_by_state,
     revenue_over_time,
     seller_risk_bars,
+    state_category_heatmap,
 )
 from src.utils import fmt_currency, fmt_number, fmt_pct, revenue_by_month
 
@@ -41,6 +43,12 @@ st.markdown(
     <style>
     [data-testid="stMetricValue"] { font-size: 1.6rem; font-weight: 700; }
     [data-testid="stMetricLabel"] { font-size: 0.85rem; color: #666; }
+
+    /* AI insight icon buttons — emoji in the narrow rightmost column */
+    div[data-testid="stColumn"]:last-of-type div[data-testid="stButton"] > button > p {
+        font-size: 1.55rem !important;
+        line-height: 1.1  !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -51,6 +59,12 @@ st.markdown(
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
+_PAGES = ["Executive Overview", "Produtos & Clientes", "AI Business Analyst"]
+
+# Navigate programmatically when a chart insight "Aprofundar" button is clicked
+if "navigate_to" in st.session_state:
+    st.session_state["_page_radio"] = st.session_state.pop("navigate_to")
+
 with st.sidebar:
     st.markdown("## 📊 Olist Analytics")
     st.caption("Consulting Case · Data & AI")
@@ -58,7 +72,8 @@ with st.sidebar:
 
     page = st.radio(
         "Página",
-        ["Executive Overview", "Produtos & Clientes", "AI Business Analyst"],
+        _PAGES,
+        key="_page_radio",
         label_visibility="collapsed",
     )
 
@@ -124,11 +139,57 @@ if cats_param and not items.empty:
     orders = orders[orders["order_id"].isin(valid_order_ids)]
 
 # Pre-aggregated views — not filtered by sidebar (already aggregated)
-vw_category = load_view("vw_sales_by_category")
-vw_state = load_view("vw_sales_by_state")
-vw_segments = load_view("vw_customer_segments")
-vw_delivery = load_view("vw_delivery_performance")
-vw_sellers = load_view("vw_seller_performance")
+vw_category        = load_view("vw_sales_by_category")
+vw_state           = load_view("vw_sales_by_state")
+vw_segments        = load_view("vw_customer_segments")
+vw_delivery        = load_view("vw_delivery_performance")
+vw_sellers         = load_view("vw_seller_performance")
+vw_state_category  = load_view("vw_sales_by_state_category")
+
+
+# ── AI chart insight helpers ───────────────────────────────────────────────────
+
+@st.dialog("💡 Insight IA")
+def _show_insight_dialog(key: str, question: str) -> None:
+    """
+    Modal dialog — executes only when called explicitly (never on page load).
+    Generates the insight on first call; shows cached result on subsequent calls.
+    Closes when the user clicks outside (native Streamlit dialog behavior).
+    """
+    cache_key = f"_insight_{key}"
+    if cache_key not in st.session_state:
+        with st.spinner("Analisando…"):
+            try:
+                from src.ai_agent import ask_brief as _ai_brief
+                st.session_state[cache_key] = _ai_brief(question)
+            except Exception as exc:
+                st.session_state[cache_key] = {
+                    "answer": f"Erro ao gerar insight: {exc}",
+                    "tools_called": [],
+                }
+
+    st.markdown(st.session_state[cache_key]["answer"])
+    st.divider()
+    if st.button("💬 Aprofundar no AI Business Analyst →", use_container_width=True):
+        st.session_state["navigate_to"] = "AI Business Analyst"
+        st.session_state["ai_prefill"]  = question
+        st.rerun()
+
+
+def _insight_header(key: str, question: str, title: str = "") -> None:
+    """Render [section title] + [🤖 button] on the same row."""
+    col_t, col_b = st.columns([11, 1])
+    with col_t:
+        if title:
+            st.subheader(title)
+    with col_b:
+        if st.button("🤖", key=f"_ibtn_{key}", help="Insight IA", use_container_width=True):
+            _show_insight_dialog(key, question)
+
+
+def _insight_result(key: str) -> None:
+    """No-op — kept for call-site compatibility."""
+    pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,12 +222,23 @@ if page == "Executive Overview":
     st.divider()
 
     # ── Revenue over time ──────────────────────────────────────────────────────
+    _insight_header(
+        "p1_trend",
+        "Como foi a evolução da receita ao longo do tempo? Há sazonalidade ou tendência de crescimento clara?",
+        title="Receita ao Longo do Tempo",
+    )
     monthly = revenue_by_month(orders)
     st.plotly_chart(revenue_over_time(monthly), use_container_width=True)
+    _insight_result("p1_trend")
 
     st.divider()
 
     # ── Category + State ───────────────────────────────────────────────────────
+    _insight_header(
+        "p1_cat_state",
+        "Quais categorias e estados lideram em receita? Onde há maior oportunidade de crescimento geográfico ou por categoria?",
+        title="Vendas por Categoria e Estado",
+    )
     col_a, col_b = st.columns(2)
 
     with col_a:
@@ -195,9 +267,48 @@ if page == "Executive Overview":
             state_data = vw_state
         st.plotly_chart(revenue_by_state(state_data), use_container_width=True)
 
+    _insight_result("p1_cat_state")
+
+    st.divider()
+
+    # ── State × Category heatmap ───────────────────────────────────────────────
+    _insight_header(
+        "p1_heatmap",
+        "Há padrões regionais de preferência de categoria? Quais combinações estado-categoria têm maior potencial inexplorado?",
+        title="Receita por Estado × Categoria",
+    )
+    hm_col1, hm_col2, hm_col3 = st.columns([2, 2, 3])
+    with hm_col1:
+        hm_top_cats = st.slider("Top categorias", 5, 20, 12, key="hm_cats")
+    with hm_col2:
+        hm_top_states = st.slider("Top estados", 5, 27, 15, key="hm_states")
+    with hm_col3:
+        hm_normalize = st.toggle(
+            "Normalizar por estado (% da receita do estado)",
+            value=False,
+            key="hm_norm",
+            help="Ativado: cor mostra participação de cada categoria na receita do estado — remove efeito SP. "
+                 "Desativado: cor em escala log da receita absoluta.",
+        )
+    st.plotly_chart(
+        state_category_heatmap(
+            vw_state_category,
+            top_n_cats=hm_top_cats,
+            top_n_states=hm_top_states,
+            normalize=hm_normalize,
+        ),
+        use_container_width=True,
+    )
+    _insight_result("p1_heatmap")
+
     st.divider()
 
     # ── Customer segments + Delivery + Sellers ─────────────────────────────────
+    _insight_header(
+        "p1_operations",
+        "Qual é o impacto dos atrasos de entrega na satisfação dos clientes e como está a saúde geral da base de vendedores?",
+        title="Clientes · Entregas · Vendedores",
+    )
     col_c, col_d, col_e = st.columns(3)
     with col_c:
         st.plotly_chart(customer_segments_donut(vw_segments), use_container_width=True)
@@ -205,6 +316,8 @@ if page == "Executive Overview":
         st.plotly_chart(delivery_kpi_bars(vw_delivery), use_container_width=True)
     with col_e:
         st.plotly_chart(seller_risk_bars(vw_sellers), use_container_width=True)
+
+    _insight_result("p1_operations")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -215,7 +328,11 @@ elif page == "Produtos & Clientes":
     st.title("Produtos & Clientes")
 
     # ── Category ranking ───────────────────────────────────────────────────────
-    st.subheader("Ranking de Categorias por Receita")
+    _insight_header(
+        "p2_categories",
+        "Quais categorias têm maior receita e qual a relação entre volume de vendas e qualidade de entrega em cada uma?",
+        title="Ranking de Categorias por Receita",
+    )
 
     if not items.empty:
         cat_agg = (
@@ -246,6 +363,8 @@ elif page == "Produtos & Clientes":
             f"regra de Pareto {'confirmada ✅' if pareto_share >= 70 else 'parcialmente observada'}."
         )
 
+        _insight_result("p2_categories")
+
         # Detailed table
         st.subheader("Tabela Detalhada")
         display = cat_agg.rename(
@@ -275,9 +394,28 @@ elif page == "Produtos & Clientes":
     else:
         st.warning("Nenhum dado disponível com os filtros selecionados.")
 
+    # ── Operational quality scatter ────────────────────────────────────────────
+    st.divider()
+    _insight_header(
+        "p2_scatter",
+        "Quais categorias têm ao mesmo tempo alta taxa de atraso e baixa satisfação? O que esses gargalos operacionais têm em comum?",
+        title="Qualidade Operacional — Nota Média vs Taxa de Atraso",
+    )
+    st.plotly_chart(category_quality_scatter(vw_category), use_container_width=True)
+    st.caption(
+        "Cada bolha é uma categoria. Tamanho = receita. "
+        "Linhas tracejadas indicam a mediana de cada eixo. "
+        "Quadrante inferior direito = alertas operacionais prioritários."
+    )
+    _insight_result("p2_scatter")
+
     # ── Customer segments ──────────────────────────────────────────────────────
     st.divider()
-    st.subheader("Segmentos de Clientes")
+    _insight_header(
+        "p2_segments",
+        "O que a segmentação de clientes revela sobre concentração de receita? Quais estratégias de retenção são mais urgentes?",
+        title="Segmentos de Clientes",
+    )
 
     col_seg, col_chart = st.columns([3, 2])
 
@@ -312,9 +450,15 @@ elif page == "Produtos & Clientes":
     with col_chart:
         st.plotly_chart(customer_segments_donut(vw_segments), use_container_width=True)
 
+    _insight_result("p2_segments")
+
     # ── Seller performance ─────────────────────────────────────────────────────
     st.divider()
-    st.subheader("Performance de Vendedores")
+    _insight_header(
+        "p2_sellers",
+        "Quantos vendedores estão em risco e o que o health score revela sobre a qualidade da base de parceiros?",
+        title="Performance de Vendedores",
+    )
 
     col_sell_a, col_sell_b = st.columns([2, 3])
 
@@ -360,74 +504,114 @@ elif page == "Produtos & Clientes":
         else:
             st.warning("View `vw_seller_performance` indisponível.")
 
+    _insight_result("p2_sellers")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 3 · AI Business Analyst
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "AI Business Analyst":
+    from src.ai_agent import ask_stream as _ask_stream
+
     st.title("🤖 AI Business Analyst")
-    st.markdown(
-        "> **Persona:** Analista sênior especializado em e-commerce brasileiro.  \n"
-        "> Cita evidências numéricas dos dados Olist e sugere ações concretas."
-    )
+
+    # ── Session state ──────────────────────────────────────────────────────────
+    if "ai_messages" not in st.session_state:
+        # Each entry: {"role": "user"|"assistant", "content": str, "tools_called": list}
+        st.session_state.ai_messages = []
+    if "ai_history" not in st.session_state:
+        # List of types.Content objects — passed to ask_stream for multi-turn
+        st.session_state.ai_history = []
+
+    # ── Toolbar ────────────────────────────────────────────────────────────────
+    col_info, col_opt, col_clear = st.columns([4, 2, 2])
+    with col_info:
+        st.caption("Analista sênior de e-commerce · cita evidências numéricas · sugere ações")
+    with col_opt:
+        show_tools = st.checkbox("Mostrar tools", value=False)
+    with col_clear:
+        if st.button("Limpar conversa", use_container_width=True):
+            st.session_state.ai_messages = []
+            st.session_state.ai_history  = []
+            st.rerun()
+
+    # ── Example prompts (hidden when conversation has messages or prefill pending) ─
+    if not st.session_state.ai_messages and "ai_prefill" not in st.session_state:
+        with st.expander("💡 Exemplos de perguntas", expanded=True):
+            st.markdown(
+                "- *Dê um panorama geral do negócio.*\n"
+                "- *Quais categorias têm maior potencial de crescimento?*\n"
+                "- *Qual é a relação entre atraso de entrega e nota do cliente?*\n"
+                "- *Qual segmento concentra mais receita e como retê-los?*\n"
+                "- *Quais estados têm o maior ticket médio?*\n"
+                "- *Quantos vendedores estão em situação de risco?*"
+            )
+
     st.divider()
 
-    with st.expander("💡 Exemplos de perguntas", expanded=False):
-        st.markdown(
-            "- *Quais categorias têm maior potencial de crescimento?*\n"
-            "- *Qual é a relação entre atraso de entrega e nota do cliente?*\n"
-            "- *Qual segmento de cliente concentra mais receita e como retê-los?*\n"
-            "- *Quais estados têm o maior ticket médio?*\n"
-            "- *Quantos vendedores estão em situação de risco?*\n"
-            "- *Dê um panorama geral do negócio.*"
+    # ── Render conversation history ────────────────────────────────────────────
+    def _render_tools(tools_called: list) -> None:
+        with st.expander(f"🔧 {len(tools_called)} tool(s) chamada(s)"):
+            for i, call in enumerate(tools_called, 1):
+                label = f"`{call['name']}`"
+                if call["args"]:
+                    label += f" — `{call['args']}`"
+                with st.expander(f"{i}. {label}"):
+                    st.json(call["result_preview"])
+
+    for msg in st.session_state.ai_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if show_tools and msg["role"] == "assistant" and msg.get("tools_called"):
+                _render_tools(msg["tools_called"])
+
+    # ── Chat input (or auto-execute prefill from chart insights) ───────────────
+    # ai_prefill is set when the user clicks "Aprofundar" on a chart insight card.
+    # It is consumed here exactly once so subsequent reruns don't re-execute it.
+    prefill = st.session_state.pop("ai_prefill", None)
+    typed   = st.chat_input("Pergunte sobre o negócio Olist…")
+    question_to_process = typed or prefill
+
+    if question_to_process:
+
+        # Show user bubble immediately
+        st.session_state.ai_messages.append(
+            {"role": "user", "content": question_to_process, "tools_called": []}
         )
+        with st.chat_message("user"):
+            st.markdown(question_to_process)
 
-    question = st.text_area(
-        "Sua pergunta",
-        placeholder="Ex: Qual a categoria com maior receita e qual o risco de entrega nela?",
-        height=120,
-    )
-
-    col_btn, col_opt = st.columns([2, 3])
-    with col_btn:
-        submit = st.button(
-            "Analisar",
-            type="primary",
-            disabled=not (question or "").strip(),
-        )
-    with col_opt:
-        show_tools = st.checkbox("Mostrar tools chamadas e evidências", value=False)
-
-    if submit and question.strip():
-        with st.spinner("Consultando dados e gerando análise…"):
+        # Stream assistant response
+        with st.chat_message("assistant"):
+            metadata: dict = {}
             try:
-                from src.ai_agent import ask as ai_ask
-                result = ai_ask(question.strip())
-                error_msg = None
+                response_text = st.write_stream(
+                    _ask_stream(
+                        question_to_process,
+                        history=st.session_state.ai_history,
+                        metadata=metadata,
+                    )
+                )
             except ValueError as exc:
-                result = None
-                error_msg = f"Configuração: {exc}"
+                st.error(f"Configuração: {exc}")
+                response_text = None
             except RuntimeError as exc:
-                result = None
-                error_msg = f"Erro no agente: {exc}"
+                st.error(f"Erro no agente: {exc}")
+                response_text = None
             except Exception as exc:
-                result = None
-                error_msg = f"Erro inesperado: {exc}"
+                st.error(f"Erro inesperado: {exc}")
+                response_text = None
 
-        if error_msg:
-            st.error(error_msg)
-        elif result:
-            st.divider()
-            st.markdown("### Análise")
-            st.markdown(result["answer"])
-
-            if show_tools and result.get("tools_called"):
-                st.divider()
-                st.markdown("#### Tools chamadas")
-                for i, call in enumerate(result["tools_called"], 1):
-                    label = f"`{call['name']}`"
-                    if call["args"]:
-                        label += f" — args: `{call['args']}`"
-                    with st.expander(f"{i}. {label}"):
-                        st.json(call["result_preview"])
+            if response_text:
+                # Persist to session state
+                st.session_state.ai_history = metadata.get(
+                    "new_contents", st.session_state.ai_history
+                )
+                st.session_state.ai_messages.append({
+                    "role":         "assistant",
+                    "content":      response_text,
+                    "tools_called": metadata.get("tools_called", []),
+                })
+                if show_tools and metadata.get("tools_called"):
+                    _render_tools(metadata["tools_called"])

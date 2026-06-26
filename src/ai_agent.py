@@ -293,113 +293,284 @@ def get_system_instruction_from_file(file_path: str) -> str:
 
 _SYSTEM_INSTRUCTION = get_system_instruction_from_file("./src/prompt.txt")
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+_BRIEF_INSTRUCTION = """
+You are a data analyst. Call exactly one tool, then respond in 1-2 sentences only.
+State the single most important finding: one specific number and its direct implication.
+No section headers. No bullet points. No recommendations section.
+Use the same language as the question (Portuguese or English).
+"""
 
-def ask(question: str) -> dict:
-    """
-    Send a question to the Gemini agent and return a result dict:
+# ── Shared helpers ─────────────────────────────────────────────────────────────
 
-        {
-            "answer":       str,         # final natural-language response
-            "tools_called": list[dict],  # [{name, args, result_preview}, ...]
-        }
-
-    Raises:
-        ValueError: if GEMINI_API_KEY is not set.
-        RuntimeError: if the model returns an unexpected finish reason.
-    """
+def _make_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError(
             "GEMINI_API_KEY não encontrado. "
             "Adicione-o ao arquivo .env na raiz do projeto."
         )
+    return genai.Client(api_key=api_key)
 
-    client = genai.Client(api_key=api_key)
 
+def _gen_config() -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=_SYSTEM_INSTRUCTION,
+        tools=[_TOOLS],
+        temperature=0.2,
+    )
+
+
+def _dispatch_fn_calls(
+    fn_calls: list,
+    tools_called: list[dict],
+) -> list[types.Part]:
+    """Execute all function calls and return a list of FunctionResponse Parts."""
+    parts: list[types.Part] = []
+    for fn_call in fn_calls:
+        fn_name = fn_call.name
+        fn_args = dict(fn_call.args) if fn_call.args else {}
+        fn_impl = _TOOL_REGISTRY.get(fn_name)
+
+        if fn_impl is None:
+            result: Any = {"error": f"Unknown tool: {fn_name}"}
+        else:
+            try:
+                result = fn_impl(**fn_args)
+            except TypeError as exc:
+                result = {"error": f"Bad arguments for {fn_name}: {exc}"}
+            except Exception as exc:
+                result = {"error": str(exc)}
+
+        preview = result[:3] if isinstance(result, list) else result
+        tools_called.append({"name": fn_name, "args": fn_args, "result_preview": preview})
+
+        parts.append(
+            types.Part.from_function_response(
+                name=fn_name,
+                response={"result": json.dumps(result, default=str)},
+            )
+        )
+    return parts
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def ask_brief(question: str) -> dict:
+    """
+    One-shot agent call optimised for compact chart insight cards.
+    Returns the same dict as ask() but uses a minimal system instruction
+    that instructs the model to respond in 1-2 sentences with no section headers.
+    """
+    client = _make_client()
     contents: list[types.Content] = [
         types.Content(role="user", parts=[types.Part(text=question)])
     ]
     tools_called: list[dict] = []
 
-    # ── Function Calling loop ──────────────────────────────────────────────────
-    for _ in range(10):  # safety cap: at most 10 model turns
+    for _ in range(5):
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_INSTRUCTION,
+                system_instruction=_BRIEF_INSTRUCTION,
                 tools=[_TOOLS],
-                temperature=0.2,
+                temperature=0.1,
             ),
             contents=contents,
         )
-
         candidate = response.candidates[0]
 
         fn_calls = [
-            part.function_call
-            for part in candidate.content.parts
-            if part.function_call is not None
+            p.function_call
+            for p in candidate.content.parts
+            if p.function_call is not None
         ]
 
         if not fn_calls:
-            # No more function calls — extract the final text answer
             answer = "".join(
-                part.text
-                for part in candidate.content.parts
-                if hasattr(part, "text") and part.text
-            ).strip()
+                p.text for p in candidate.content.parts
+                if hasattr(p, "text") and p.text
+            ).strip() or "Dados insuficientes para gerar um insight."
+            contents.append(candidate.content)
+            return {"answer": answer, "tools_called": tools_called, "new_contents": contents}
 
-            if not answer:
-                answer = (
-                    "Esta análise ainda não está disponível com segurança "
-                    "com os dados atuais."
-                )
-
-            return {"answer": answer, "tools_called": tools_called}
-
-        # Append the model's turn (with function calls) to the conversation
         contents.append(candidate.content)
+        fn_parts = _dispatch_fn_calls(fn_calls, tools_called)
+        contents.append(types.Content(role="user", parts=fn_parts))
 
-        # Execute each function call and collect responses
-        function_response_parts: list[types.Part] = []
+    return {"answer": "Dados insuficientes para gerar um insight.", "tools_called": tools_called, "new_contents": contents}
 
-        for fn_call in fn_calls:
-            fn_name = fn_call.name
-            fn_args = dict(fn_call.args) if fn_call.args else {}
-            fn_impl = _TOOL_REGISTRY.get(fn_name)
 
-            if fn_impl is None:
-                result: Any = {"error": f"Unknown tool: {fn_name}"}
-            else:
-                try:
-                    result = fn_impl(**fn_args)
-                except TypeError as exc:
-                    result = {"error": f"Bad arguments for {fn_name}: {exc}"}
-                except Exception as exc:
-                    result = {"error": str(exc)}
+def ask(
+    question: str,
+    history: list[types.Content] | None = None,
+) -> dict:
+    """
+    Send a question to the Gemini agent and return a result dict:
 
-            # Record for UI display (preview = first 3 rows if list)
-            preview = result[:3] if isinstance(result, list) else result
-            tools_called.append({
-                "name":           fn_name,
-                "args":           fn_args,
-                "result_preview": preview,
-            })
+        {
+            "answer":       str,
+            "tools_called": list[dict],
+            "new_contents": list[types.Content],  # full conversation for next turn
+        }
 
-            function_response_parts.append(
-                types.Part.from_function_response(
-                    name=fn_name,
-                    response={"result": json.dumps(result, default=str)},
-                )
-            )
+    Pass ``history`` (the ``new_contents`` from a previous call) to enable
+    multi-turn conversation.
 
-        # Append tool results to the conversation
-        contents.append(
-            types.Content(role="user", parts=function_response_parts)
+    Raises:
+        ValueError:  if GEMINI_API_KEY is not set.
+        RuntimeError: if the safety cap of 10 turns is exceeded.
+    """
+    client = _make_client()
+    contents: list[types.Content] = list(history) if history else []
+    contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
+    tools_called: list[dict] = []
+
+    for _ in range(10):
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            config=_gen_config(),
+            contents=contents,
         )
+        candidate = response.candidates[0]
 
-    # Exceeded safety cap
+        fn_calls = [
+            p.function_call
+            for p in candidate.content.parts
+            if p.function_call is not None
+        ]
+
+        if not fn_calls:
+            answer = "".join(
+                p.text for p in candidate.content.parts
+                if hasattr(p, "text") and p.text
+            ).strip() or (
+                "Esta análise ainda não está disponível com segurança "
+                "com os dados atuais."
+            )
+            contents.append(candidate.content)
+            return {"answer": answer, "tools_called": tools_called, "new_contents": contents}
+
+        contents.append(candidate.content)
+        fn_parts = _dispatch_fn_calls(fn_calls, tools_called)
+        contents.append(types.Content(role="user", parts=fn_parts))
+
+    raise RuntimeError(
+        "O agente excedeu o número máximo de chamadas de ferramentas "
+        "sem produzir uma resposta final."
+    )
+
+
+def ask_stream(
+    question: str,
+    history: list[types.Content] | None = None,
+    metadata: dict | None = None,
+):
+    """
+    Streaming variant. Yields text chunks from the final answer turn so the
+    caller can pass this generator directly to ``st.write_stream()``.
+
+    After the generator is exhausted, the ``metadata`` dict (if provided) will
+    contain:
+        - ``tools_called``: list of tool call records
+        - ``new_contents``: full conversation list for the next turn
+        - ``answer``:       complete answer text
+
+    All intermediate function-calling turns are executed synchronously before
+    streaming begins — streaming only applies to the final text response.
+
+    Raises:
+        ValueError:  if GEMINI_API_KEY is not set.
+        RuntimeError: if the safety cap of 10 turns is exceeded.
+    """
+    if metadata is None:
+        metadata = {}
+
+    client = _make_client()
+    contents: list[types.Content] = list(history) if history else []
+    contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
+    tools_called: list[dict] = []
+
+    # ── Function-calling turns (blocking) ─────────────────────────────────────
+    for _ in range(10):
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            config=_gen_config(),
+            contents=contents,
+        )
+        candidate = response.candidates[0]
+
+        fn_calls = [
+            p.function_call
+            for p in candidate.content.parts
+            if p.function_call is not None
+        ]
+
+        if not fn_calls:
+            # This was the final turn — but arrived via generate_content, not
+            # streaming. Yield its text and finish.
+            answer = "".join(
+                p.text for p in candidate.content.parts
+                if hasattr(p, "text") and p.text
+            ).strip() or (
+                "Esta análise ainda não está disponível com segurança "
+                "com os dados atuais."
+            )
+            contents.append(candidate.content)
+            metadata["tools_called"]  = tools_called
+            metadata["new_contents"]  = contents
+            metadata["answer"]        = answer
+            yield answer
+            return
+
+        contents.append(candidate.content)
+        fn_parts = _dispatch_fn_calls(fn_calls, tools_called)
+        contents.append(types.Content(role="user", parts=fn_parts))
+
+        # Peek at the next turn: if it will have no more function calls, switch
+        # to streaming for that final response.
+        next_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            config=_gen_config(),
+            contents=contents,
+        )
+        next_candidate = next_response.candidates[0]
+        next_fn_calls = [
+            p.function_call
+            for p in next_candidate.content.parts
+            if p.function_call is not None
+        ]
+
+        if next_fn_calls:
+            # Still more function calls — loop continues
+            contents.append(next_candidate.content)
+            fn_parts2 = _dispatch_fn_calls(next_fn_calls, tools_called)
+            contents.append(types.Content(role="user", parts=fn_parts2))
+            continue
+
+        # Next turn is the final text response — stream it
+        text_chunks: list[str] = []
+        for chunk in client.models.generate_content_stream(
+            model="gemini-2.5-flash",
+            config=_gen_config(),
+            contents=contents,
+        ):
+            for part in chunk.candidates[0].content.parts:
+                if hasattr(part, "text") and part.text:
+                    text_chunks.append(part.text)
+                    yield part.text
+
+        full_answer = "".join(text_chunks).strip() or (
+            "Esta análise ainda não está disponível com segurança "
+            "com os dados atuais."
+        )
+        contents.append(
+            types.Content(role="model", parts=[types.Part(text=full_answer)])
+        )
+        metadata["tools_called"] = tools_called
+        metadata["new_contents"] = contents
+        metadata["answer"]       = full_answer
+        return
+
     raise RuntimeError(
         "O agente excedeu o número máximo de chamadas de ferramentas "
         "sem produzir uma resposta final."

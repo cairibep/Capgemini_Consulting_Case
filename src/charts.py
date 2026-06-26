@@ -6,6 +6,7 @@ A graceful _empty() fallback is returned when the DataFrame is empty
 so the app never crashes due to missing data.
 """
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -175,6 +176,165 @@ def delivery_kpi_bars(df: pd.DataFrame) -> go.Figure:
         hovertemplate="<b>%{x}</b><br>Pedidos: %{y:,}<extra></extra>",
     )
     fig.update_layout(title="Pedidos: No Prazo vs Com Atraso", showlegend=False)
+    return fig
+
+
+# ── Operational quality scatter ───────────────────────────────────────────────
+
+def category_quality_scatter(df: pd.DataFrame) -> go.Figure:
+    """Scatter: avg review score (Y) vs late rate (X), bubble size = revenue.
+
+    Each bubble is a category. Quadrants reveal operational health at a glance:
+    top-left = best (low delay, high satisfaction), bottom-right = worst.
+    """
+    required = {"category_name", "avg_review_score", "late_rate", "revenue"}
+    if df.empty or not required.issubset(df.columns):
+        return _empty("Dados insuficientes para o scatter de qualidade")
+
+    df = df.copy().dropna(subset=["avg_review_score", "late_rate", "revenue"])
+
+    fig = px.scatter(
+        df,
+        x="late_rate",
+        y="avg_review_score",
+        size="revenue",
+        color="revenue",
+        color_continuous_scale="Blues",
+        hover_name="category_name",
+        hover_data={
+            "revenue": ":,.2f",
+            "late_rate": ":.1%",
+            "avg_review_score": ":.2f",
+            "orders_count": True,
+        },
+        labels={
+            "late_rate": "Taxa de Atraso",
+            "avg_review_score": "Nota Média (1–5)",
+            "revenue": "Receita (R$)",
+            "orders_count": "Pedidos",
+        },
+        size_max=55,
+        template=TEMPLATE,
+    )
+
+    # Reference lines: medians
+    med_x = df["late_rate"].median()
+    med_y = df["avg_review_score"].median()
+    fig.add_vline(x=med_x, line_dash="dot", line_color="#aaa", annotation_text="mediana atraso", annotation_position="top right")
+    fig.add_hline(y=med_y, line_dash="dot", line_color="#aaa", annotation_text="mediana nota", annotation_position="bottom right")
+
+    fig.update_traces(
+        marker_line_width=0.5,
+        marker_line_color="white",
+    )
+    fig.update_layout(
+        title="Qualidade Operacional por Categoria — Nota vs Taxa de Atraso",
+        xaxis_tickformat=".0%",
+        coloraxis_showscale=False,
+        height=520,
+    )
+    return fig
+
+
+# ── State × category heatmap ──────────────────────────────────────────────────
+
+def state_category_heatmap(
+    df: pd.DataFrame,
+    top_n_cats: int = 12,
+    top_n_states: int = 15,
+    normalize: bool = False,
+) -> go.Figure:
+    """Heatmap: states (rows) × top N categories (cols), coloured by revenue.
+
+    Source: vw_sales_by_state_category.
+
+    Args:
+        top_n_cats:   number of categories to show (by total revenue)
+        top_n_states: number of states to show (by total revenue)
+        normalize:    when True, colour by % of each state's total revenue
+                      instead of absolute value — removes the SP dominance effect
+    """
+    required = {"customer_state", "category_name", "revenue"}
+    if df.empty or not required.issubset(df.columns):
+        return _empty("View vw_sales_by_state_category indisponível")
+
+    # Limit to top categories and top states
+    top_cats = (
+        df.groupby("category_name")["revenue"].sum()
+        .nlargest(top_n_cats).index.tolist()
+    )
+    top_states = (
+        df.groupby("customer_state")["revenue"].sum()
+        .nlargest(top_n_states).index.tolist()
+    )
+    filtered = df[
+        df["category_name"].isin(top_cats) & df["customer_state"].isin(top_states)
+    ]
+
+    # Pivot: states as rows, categories as columns
+    pivot = filtered.pivot_table(
+        index="customer_state",
+        columns="category_name",
+        values="revenue",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    # Sort by total revenue (most important top-left)
+    pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+    pivot = pivot[pivot.sum(axis=0).sort_values(ascending=False).index]
+
+    # Keep the raw values for hover before any transformation
+    pivot_raw = pivot.copy()
+
+    if normalize:
+        # Each cell = % of that state's total revenue across ALL categories
+        row_totals = pivot_raw.sum(axis=1)
+        pivot_display = pivot_raw.div(row_totals, axis=0) * 100
+        color_label = "Share da receita do estado (%)"
+        hover_z_fmt = ":.1f"
+        hover_z_suffix = "%"
+        colorbar_ticksuffix = "%"
+        colorbar_tickformat = ".1f"
+    else:
+        # Log1p transform: compresses the SP spike so other states get colour
+        pivot_display = np.log1p(pivot_raw)
+        color_label = "Receita (escala log)"
+        hover_z_fmt = ",.2f"
+        hover_z_suffix = ""
+        colorbar_ticksuffix = ""
+        colorbar_tickformat = ",.0f"
+
+    fig = px.imshow(
+        pivot_display,
+        labels=dict(x="Categoria", y="Estado", color=color_label),
+        color_continuous_scale="Blues",
+        aspect="auto",
+        template=TEMPLATE,
+        text_auto=False,
+    )
+
+    # Inject actual revenue values into customdata for hover
+    fig.update_traces(
+        customdata=pivot_raw.values,
+        hovertemplate=(
+            "<b>%{y} × %{x}</b><br>"
+            f"Receita: R$ %{{customdata:{hover_z_fmt}}}{hover_z_suffix}"
+            "<extra></extra>"
+        ),
+    )
+    mode_label = "% por estado" if normalize else "receita absoluta (escala log)"
+    fig.update_layout(
+        title=f"Receita por Estado × Categoria — top {top_n_cats} categorias · {top_n_states} estados · {mode_label}",
+        xaxis_tickangle=-40,
+        coloraxis_colorbar=dict(
+            title=color_label,
+            tickformat=colorbar_tickformat,
+            ticksuffix=colorbar_ticksuffix,
+        ),
+        height=max(400, top_n_states * 28 + 160),
+        margin=dict(b=130),
+    )
     return fig
 
 
