@@ -35,6 +35,8 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     ports:
       - "8501:8501"
+    # volumes:
+    #   - .:/app
     restart: unless-stopped
 
 volumes:

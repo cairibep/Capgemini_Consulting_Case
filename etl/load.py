@@ -183,8 +183,3 @@ def _create_indexes(engine, schema: str, tables: dict) -> None:
 
 def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
-
-
-# Kept for backwards compatibility with any external callers.
-def quote_name(name: str) -> str:
-    return _quote(name)

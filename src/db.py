@@ -24,7 +24,7 @@ def _get_engine():
     user = quote_plus(os.getenv("POSTGRES_USER", "olist"))
     password = quote_plus(os.getenv("POSTGRES_PASSWORD", "olist"))
     host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "55432")
+    port = os.getenv("POSTGRES_PORT", "5432")
     db = os.getenv("POSTGRES_DB", "olist")
     url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
     return create_engine(url, pool_pre_ping=True)

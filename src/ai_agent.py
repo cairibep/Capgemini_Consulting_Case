@@ -19,8 +19,12 @@ from src.ai_tools import (
     get_customer_segments,
     get_delivery_performance,
     get_sales_by_category,
+    get_sales_by_city,
     get_sales_by_state,
+    get_sales_by_state_category,
+    get_sales_over_time,
     get_seller_performance,
+    get_top_products,
 )
 
 load_dotenv()
@@ -28,12 +32,16 @@ load_dotenv()
 # ── Function registry ──────────────────────────────────────────────────────────
 
 _TOOL_REGISTRY: dict[str, Any] = {
-    "get_sales_by_category":    get_sales_by_category,
-    "get_sales_by_state":       get_sales_by_state,
-    "get_customer_segments":    get_customer_segments,
-    "get_seller_performance":   get_seller_performance,
-    "get_delivery_performance": get_delivery_performance,
-    "get_business_overview":    get_business_overview,
+    "get_sales_by_category":      get_sales_by_category,
+    "get_sales_by_state":         get_sales_by_state,
+    "get_customer_segments":      get_customer_segments,
+    "get_seller_performance":     get_seller_performance,
+    "get_delivery_performance":   get_delivery_performance,
+    "get_business_overview":      get_business_overview,
+    "get_sales_over_time":        get_sales_over_time,
+    "get_sales_by_city":          get_sales_by_city,
+    "get_sales_by_state_category": get_sales_by_state_category,
+    "get_top_products":           get_top_products,
 }
 
 # ── Tool declarations (Gemini function schema) ─────────────────────────────────
@@ -145,6 +153,123 @@ _TOOLS = types.Tool(function_declarations=[
         ),
     ),
     types.FunctionDeclaration(
+        name="get_sales_over_time",
+        description=(
+            "Returns monthly sales metrics in chronological order: "
+            "revenue, orders, unique customers, average ticket, review score and late rate. "
+            "Use this for questions about trends, seasonality, growth over time, "
+            "or how the business evolved month by month."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "limit": types.Schema(
+                    type=types.Type.INTEGER,
+                    description="Number of months to return (1–50). Default 24.",
+                ),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_sales_by_city",
+        description=(
+            "Returns sales metrics aggregated by city, optionally filtered by state. "
+            "Includes revenue, orders, average ticket, review score and late rate. "
+            "Use this for city-level or intra-state geographic analysis."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "limit": types.Schema(
+                    type=types.Type.INTEGER,
+                    description="Number of cities to return (1–50). Default 15.",
+                ),
+                "order_by": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Column to sort by, descending. "
+                        "Allowed: revenue, orders_count, avg_order_value, "
+                        "avg_review_score, late_rate."
+                    ),
+                ),
+                "state": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Optional 2-letter Brazilian state code to filter by "
+                        "(e.g. 'SP', 'RJ', 'MG'). Omit for all states."
+                    ),
+                ),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_sales_by_state_category",
+        description=(
+            "Returns sales metrics broken down by (state, category) pairs. "
+            "When a state is provided, returns the top categories within that state. "
+            "Use this for questions like 'which categories sell most in SP?' or "
+            "'how do categories differ across regions?'"
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "state": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Optional 2-letter Brazilian state code to filter by "
+                        "(e.g. 'SP', 'RJ', 'MG'). Omit for top pairs globally."
+                    ),
+                ),
+                "limit": types.Schema(
+                    type=types.Type.INTEGER,
+                    description="Number of rows to return (1–50). Default 10.",
+                ),
+                "order_by": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Column to sort by, descending. "
+                        "Allowed: revenue, orders_count, items_sold, "
+                        "avg_review_score, late_rate."
+                    ),
+                ),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_top_products",
+        description=(
+            "Returns top individual products by sales metrics, "
+            "optionally filtered by category. "
+            "Includes product_id, category, orders, items sold, revenue, "
+            "average item value, review score and late rate. "
+            "Use this for product-level analysis or to find star products within a category."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "limit": types.Schema(
+                    type=types.Type.INTEGER,
+                    description="Number of products to return (1–50). Default 10.",
+                ),
+                "order_by": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Column to sort by, descending. "
+                        "Allowed: revenue, orders_count, items_sold, "
+                        "avg_review_score, late_rate."
+                    ),
+                ),
+                "category": types.Schema(
+                    type=types.Type.STRING,
+                    description=(
+                        "Optional category name to filter (exact match, case-insensitive). "
+                        "Omit to return top products across all categories."
+                    ),
+                ),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
         name="get_business_overview",
         description=(
             "Returns a high-level business snapshot across all views: "
@@ -166,7 +291,7 @@ def get_system_instruction_from_file(file_path: str) -> str:
     with open(file_path, "r") as file:
         return file.read()
 
-_SYSTEM_INSTRUCTION = get_system_instruction_from_file("prompt.txt")
+_SYSTEM_INSTRUCTION = get_system_instruction_from_file("./src/prompt.txt")
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 

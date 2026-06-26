@@ -182,6 +182,154 @@ def get_delivery_performance() -> list[dict] | dict:
     return _run(sql)
 
 
+def get_sales_over_time(limit: int = 24) -> list[dict] | dict:
+    """
+    Returns monthly sales metrics in chronological order (most recent first).
+
+    Args:
+        limit: Number of months to return (1–50). Default 24 (two years).
+    """
+    limit = min(max(1, int(limit)), MAX_LIMIT)
+
+    sql = f"""
+        SELECT
+            month,
+            orders_count,
+            unique_customers,
+            revenue,
+            avg_order_value,
+            avg_review_score,
+            late_rate
+        FROM {_view("vw_sales_over_time")}
+        ORDER BY month DESC
+        LIMIT :limit
+    """
+    rows = _run(sql, {"limit": limit})
+    # Return chronological order so the model reads oldest → newest
+    if isinstance(rows, list):
+        return list(reversed(rows))
+    return rows
+
+
+def get_sales_by_city(
+    limit: int = 15,
+    order_by: str = "revenue",
+    state: str | None = None,
+) -> list[dict] | dict:
+    """
+    Returns sales metrics aggregated by city, optionally filtered by state.
+
+    Args:
+        limit:    Number of rows to return (1–50). Default 15.
+        order_by: Column to sort by descending.
+                  Allowed: revenue, orders_count, avg_order_value,
+                           avg_review_score, late_rate.
+        state:    Optional 2-letter state code to filter (e.g. "SP", "RJ").
+    """
+    limit    = min(max(1, int(limit)), MAX_LIMIT)
+    order_by = order_by if order_by in _STATE_ORDER_COLS else "revenue"
+
+    if state:
+        sql = f"""
+            SELECT customer_city, customer_state, orders_count,
+                   revenue, avg_order_value, avg_review_score, late_rate
+            FROM {_view("vw_sales_by_city")}
+            WHERE UPPER(customer_state) = UPPER(:state)
+            ORDER BY {order_by} DESC NULLS LAST
+            LIMIT :limit
+        """
+        return _run(sql, {"state": state, "limit": limit})
+
+    sql = f"""
+        SELECT customer_city, customer_state, orders_count,
+               revenue, avg_order_value, avg_review_score, late_rate
+        FROM {_view("vw_sales_by_city")}
+        ORDER BY {order_by} DESC NULLS LAST
+        LIMIT :limit
+    """
+    return _run(sql, {"limit": limit})
+
+
+def get_sales_by_state_category(
+    state: str | None = None,
+    limit: int = 10,
+    order_by: str = "revenue",
+) -> list[dict] | dict:
+    """
+    Returns sales metrics broken down by (state, category).
+    When a state is provided, returns top categories within that state.
+    Without a state, returns the top (state, category) pairs globally.
+
+    Args:
+        state:    Optional 2-letter state code to filter (e.g. "SP", "RJ").
+        limit:    Number of rows to return (1–50). Default 10.
+        order_by: Column to sort by descending.
+                  Allowed: revenue, orders_count, items_sold,
+                           avg_review_score, late_rate.
+    """
+    limit    = min(max(1, int(limit)), MAX_LIMIT)
+    order_by = order_by if order_by in _CATEGORY_ORDER_COLS else "revenue"
+
+    if state:
+        sql = f"""
+            SELECT customer_state, category_name, orders_count,
+                   items_sold, revenue, avg_item_value, avg_review_score, late_rate
+            FROM {_view("vw_sales_by_state_category")}
+            WHERE UPPER(customer_state) = UPPER(:state)
+            ORDER BY {order_by} DESC NULLS LAST
+            LIMIT :limit
+        """
+        return _run(sql, {"state": state, "limit": limit})
+
+    sql = f"""
+        SELECT customer_state, category_name, orders_count,
+               items_sold, revenue, avg_item_value, avg_review_score, late_rate
+        FROM {_view("vw_sales_by_state_category")}
+        ORDER BY {order_by} DESC NULLS LAST
+        LIMIT :limit
+    """
+    return _run(sql, {"limit": limit})
+
+
+def get_top_products(
+    limit: int = 10,
+    order_by: str = "revenue",
+    category: str | None = None,
+) -> list[dict] | dict:
+    """
+    Returns top products by sales metrics, optionally filtered by category.
+
+    Args:
+        limit:    Number of products to return (1–50). Default 10.
+        order_by: Column to sort by descending.
+                  Allowed: revenue, orders_count, items_sold,
+                           avg_review_score, late_rate.
+        category: Optional category name to filter (exact match).
+    """
+    limit    = min(max(1, int(limit)), MAX_LIMIT)
+    order_by = order_by if order_by in _CATEGORY_ORDER_COLS else "revenue"
+
+    if category:
+        sql = f"""
+            SELECT product_id, category_name, orders_count,
+                   items_sold, revenue, avg_item_value, avg_review_score, late_rate
+            FROM {_view("vw_top_products")}
+            WHERE LOWER(category_name) = LOWER(:category)
+            ORDER BY {order_by} DESC NULLS LAST
+            LIMIT :limit
+        """
+        return _run(sql, {"category": category, "limit": limit})
+
+    sql = f"""
+        SELECT product_id, category_name, orders_count,
+               items_sold, revenue, avg_item_value, avg_review_score, late_rate
+        FROM {_view("vw_top_products")}
+        ORDER BY {order_by} DESC NULLS LAST
+        LIMIT :limit
+    """
+    return _run(sql, {"limit": limit})
+
+
 def get_business_overview() -> dict:
     """
     Returns a high-level business snapshot combining totals from all views:
