@@ -86,6 +86,20 @@ with st.sidebar:
     min_date = pd.to_datetime(opts["min_date"]).date() if opts["min_date"] else None
     max_date = pd.to_datetime(opts["max_date"]).date() if opts["max_date"] else None
 
+    # Persist date bounds so the clear callback (which has no local scope
+    # access) can reset filter_date to the full range.
+    if min_date and max_date:
+        st.session_state["_date_min"] = min_date
+        st.session_state["_date_max"] = max_date
+
+    def _clear_filters():
+        st.session_state["filter_states"] = []
+        st.session_state["filter_cats"] = []
+        _min = st.session_state.get("_date_min")
+        _max = st.session_state.get("_date_max")
+        if _min and _max:
+            st.session_state["filter_date"] = (_min, _max)
+
     if min_date and max_date:
         date_range = st.date_input(
             "Período",
@@ -93,6 +107,7 @@ with st.sidebar:
             min_value=min_date,
             max_value=max_date,
             format="DD/MM/YYYY",
+            key="filter_date",
         )
         date_start = str(date_range[0]) if len(date_range) > 0 else None
         date_end = str(date_range[1]) if len(date_range) > 1 else None
@@ -105,6 +120,7 @@ with st.sidebar:
         "Estado (UF)",
         opts["states"],
         placeholder="Todos os estados",
+        key="filter_states",
     )
 
     # Category filter
@@ -112,11 +128,11 @@ with st.sidebar:
         "Categoria",
         opts["categories"],
         placeholder="Todas as categorias",
+        key="filter_cats",
     )
 
     st.divider()
-    if st.button("Limpar filtros", use_container_width=True):
-        st.rerun()
+    st.button("Limpar filtros", on_click=_clear_filters, use_container_width=True)
 
 # Convert to tuples so Streamlit cache keys are hashable
 states_param = tuple(selected_states) if selected_states else None
@@ -256,7 +272,7 @@ if page == "Executive Overview":
         st.plotly_chart(revenue_by_category(cat_data), use_container_width=True)
 
     with col_b:
-        if states_param or date_start:
+        if states_param or cats_param or date_start:
             state_data = (
                 orders.groupby("customer_state", as_index=False)
                 .agg(revenue=("order_total", "sum"), orders_count=("order_id", "nunique"))
