@@ -14,7 +14,6 @@ Dashboard analítico com agente de IA sobre o dataset público de e-commerce bra
 6. [Executando com Docker (cloud ou servidor)](#executando-com-docker-cloud-ou-servidor)
 7. [A persona de IA](#a-persona-de-ia)
 8. [Exemplos de perguntas](#exemplos-de-perguntas)
-9. [Limitações](#limitações)
 
 ---
 
@@ -242,6 +241,19 @@ Abra [http://localhost:8501](http://localhost:8501).
 
 ## Executando com Docker (cloud ou servidor)
 
+Abra o `.env` novamente e atualize as chaves:
+
+```env
+POSTGRES_HOST=postgres # mude para o host do container PostgreSQL
+POSTGRES_PORT=5432
+POSTGRES_DB=olist
+POSTGRES_USER=olist
+POSTGRES_PASSWORD=olist
+POSTGRES_SCHEMA=analytics
+DATA_DIR=/app/data # mude para o caminho do dataset no container
+GEMINI_API_KEY=sua_chave_aqui
+```
+
 Essa opção sobe tudo em containers: PostgreSQL + ETL + Streamlit. Testado e deployado em AWS EC2.
 
 ### Pré-requisitos
@@ -362,23 +374,3 @@ docker compose down -v       # remove também os dados do banco
 
 **"Quais categorias dominam em SP?"**
 > Chama `get_sales_by_state_category(state="SP")` → retorna ranking de categorias dentro do estado.
-
----
-
-## Transformações implementadas no ETL
-
-- Conversão de timestamps para `datetime`; nulos preservados em entregas não concluídas
-- `is_late`: pedido atrasou se `delivered_date > estimated_date`
-- `delivery_delay_days` e `delivery_time_days` calculados para pedidos entregues
-- Categoria final: `COALESCE(product_category_name_english, product_category_name)`
-- Segmentação de clientes por `customer_lifetime_value`: **VIP**, **High Value**, **Regular**, **Low Value**
-- `seller_health_score`: índice composto de receita, nota média e taxa de atraso
-
----
-
-## Limitações
-
-- **Dados históricos:** o dataset cobre apenas 2016–2018; tendências recentes não estão disponíveis
-- **Segmentação de clientes:** baseada em LTV absoluto com quartis — não leva em conta frequência de compra (sem RFM completo)
-- **Sem autenticação:** o dashboard não possui controle de acesso
-- **Rate limit:** o plano gratuito do Gemini API tem limite de 15 requisições/minuto — uso intenso consecutivo pode gerar erros temporários
